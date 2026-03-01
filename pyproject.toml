@@ -4,11 +4,22 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ozaki-jax"
-version = "0.1.0"
+version = "0.1.1"
 description = "FP64-accurate matrix multiplication from BF16 hardware via Ozaki Extract in JAX"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
+authors = [{ name = "Efithor" }]
+keywords = ["jax", "tpu", "bfloat16", "fp64", "matmul", "linear-algebra", "numerical"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
 dependencies = [
     "jax>=0.4",
     "numpy",
@@ -18,4 +29,6 @@ dependencies = [
 tpu = ["jax[tpu]"]
 
 [project.urls]
+Homepage = "https://github.com/efithor/ozaki-jax"
 Repository = "https://github.com/efithor/ozaki-jax"
+Issues = "https://github.com/efithor/ozaki-jax/issues"

@@ -7,7 +7,7 @@
 >>> C = matmul(A, B)  # FP64-accurate, uses 36 BF16 GEMMs
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .matmul import matmul, matmul_numpy
 from .extract import extract_split_rows, extract_split_cols
