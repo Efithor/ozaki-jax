@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ozaki-jax"
+version = "0.1.0"
+description = "FP64-accurate matrix multiplication from BF16 hardware via Ozaki Extract in JAX"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = [
+    "jax>=0.4",
+    "numpy",
+]
+
+[project.optional-dependencies]
+tpu = ["jax[tpu]"]
+
+[project.urls]
+Repository = "https://github.com/efithor/ozaki-jax"
