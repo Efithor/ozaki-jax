@@ -95,3 +95,91 @@ def extract_split_cols(X_f64, rho, n_slices=8):
         scales.append(c_y)
 
     return slices, scales
+
+
+# FP32 extraction helpers for the on-device pipeline.
+
+
+def _compute_rho_f32(K, m1=24, m2=8, m3=24):
+    """Compute rho lower bound for FP32 working precision."""
+    xi = m1 + 1 - m2  # 24+1-8 = 17
+    gamma = int(np.ceil(m1 - (m3 - np.ceil(np.log2(max(K, 2)))) / 2))
+    return max(gamma, xi)
+
+
+def f32_extract_split_rows(X_f32, rho, n_slices=5):
+    """Split an FP32 matrix into row-scaled Extract slices."""
+    X_f32 = np.float32(X_f32)
+    N, K = X_f32.shape
+    slices = []
+    scales = []
+    residual = X_f32.copy()
+
+    for _ in range(n_slices):
+        row_max = np.float32(np.max(np.abs(residual), axis=1))  # (N,)
+
+        zero_mask = (row_max == 0)
+        row_max_safe = np.where(zero_mask, np.float32(1.0), row_max)
+
+        c_x = np.floor(np.float32(np.log2(row_max_safe)))
+        c_x = np.where(zero_mask, np.float32(0.0), c_x)
+
+        # Sigma = 0.75 * 2^(rho + c_x) in FP32.
+        sigma = np.float32(np.float32(0.75) * np.ldexp(
+            np.ones(N, dtype=np.float32),
+            (rho + c_x).astype(np.int32)))
+        sigma_2d = sigma[:, np.newaxis]
+
+        # Sigma trick extracts top bits under FP32 rounding.
+        v = np.float32(np.float32(residual + sigma_2d) - sigma_2d)
+        v = np.where(zero_mask[:, np.newaxis], np.float32(0.0), v)
+        residual = np.float32(residual - v)
+
+        # Normalize by row scales.
+        inv_scale = np.float32(np.ldexp(
+            np.ones(N, dtype=np.float32),
+            (-c_x).astype(np.int32)))
+        v_norm = np.float32(v * inv_scale[:, np.newaxis])
+
+        # Store as float32 values (BF16-exact by construction).
+        slices.append(v_norm)
+        scales.append(c_x)
+
+    return slices, scales
+
+
+def f32_extract_split_cols(X_f32, rho, n_slices=5):
+    """Split an FP32 matrix into column-scaled Extract slices."""
+    X_f32 = np.float32(X_f32)
+    K, M = X_f32.shape
+    slices = []
+    scales = []
+    residual = X_f32.copy()
+
+    for _ in range(n_slices):
+        col_max = np.float32(np.max(np.abs(residual), axis=0))  # (M,)
+
+        zero_mask = (col_max == 0)
+        col_max_safe = np.where(zero_mask, np.float32(1.0), col_max)
+
+        c_y = np.floor(np.float32(np.log2(col_max_safe)))
+        c_y = np.where(zero_mask, np.float32(0.0), c_y)
+
+        sigma = np.float32(np.float32(0.75) * np.ldexp(
+            np.ones(M, dtype=np.float32),
+            (rho + c_y).astype(np.int32)))
+        sigma_2d = sigma[np.newaxis, :]
+
+        v = np.float32(np.float32(residual + sigma_2d) - sigma_2d)
+        v = np.where(zero_mask[np.newaxis, :], np.float32(0.0), v)
+        residual = np.float32(residual - v)
+
+        inv_scale = np.float32(np.ldexp(
+            np.ones(M, dtype=np.float32),
+            (-c_y).astype(np.int32)))
+        v_norm = np.float32(v * inv_scale[np.newaxis, :])
+
+        slices.append(v_norm)
+        scales.append(c_y)
+
+    return slices, scales
