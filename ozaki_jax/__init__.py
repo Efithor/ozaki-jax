@@ -1,15 +1,17 @@
-"""ozaki-jax: FP64-accurate matrix multiplication from BF16 hardware via Ozaki Extract.
+"""ozaki-jax public API."""
 
->>> import numpy as np
->>> from ozaki_jax import matmul
->>> A = np.random.randn(128, 128)
->>> B = np.random.randn(128, 128)
->>> C = matmul(A, B)  # FP64-accurate, uses 36 BF16 GEMMs
-"""
-
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 from .matmul import matmul, matmul_numpy
-from .extract import extract_split_rows, extract_split_cols
+from .extract import (
+    extract_split_rows, extract_split_cols,
+    f32_extract_split_rows, f32_extract_split_cols,
+)
+from .pallas_ops import accumulate_2sum, validate_accumulation_2sum
 
-__all__ = ["matmul", "matmul_numpy", "extract_split_rows", "extract_split_cols"]
+__all__ = [
+    "matmul", "matmul_numpy",
+    "extract_split_rows", "extract_split_cols",
+    "f32_extract_split_rows", "f32_extract_split_cols",
+    "accumulate_2sum", "validate_accumulation_2sum",
+]

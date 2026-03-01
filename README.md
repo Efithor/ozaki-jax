@@ -22,15 +22,45 @@ from ozaki_jax import matmul_numpy
 C = matmul_numpy(A, B)
 ```
 
+On-device extraction path (fixed 65 GEMMs):
+
+```python
+C = matmul(A, B, pipeline="ondevice")
+```
+
+On-device extraction with on-device 2Sum accumulation:
+
+```python
+C = matmul(A, B, pipeline="ondevice", accumulation="ondevice")
+```
+
+Safety preflight with explicit fallback:
+
+```python
+# Reject unsafe Ozaki configurations (default behavior).
+C = matmul(A, B, safe_mode="raise")
+
+# Fallback to plain FP64 matmul when preflight fails.
+C = matmul(A, B, safe_mode="fallback")
+```
+
 ## Method summary
 
 Given `C = A @ B`:
 
-1. Split `A` and `B` into `n_slices` magnitude-controlled slices with Extract.
-2. Compute BF16-derived GEMM pairs where `i + j <= n_slices - 1`.
-3. Rescale and accumulate products in FP64.
+1. Split `A` and `B` into magnitude-controlled slices with Extract.
+2. Run BF16-derived GEMMs for the selected pipeline.
+3. Rescale and accumulate products.
 
-With `n_slices = 8`, this keeps `8 * 9 / 2 = 36` slice-pair GEMMs.
+Pipeline options:
+
+- `pipeline="host"` (default): FP64 host extraction, triangular pairing, 36 GEMMs at `n_slices=8`.
+- `pipeline="ondevice"`: FP32 extraction (`hi/lo` split), fixed block structure, 65 GEMMs.
+
+Accumulation options:
+
+- `accumulation="host"` (default): FP64 accumulation on host.
+- `accumulation="ondevice"`: on-device FP32 2Sum accumulation (on-device pipeline only).
 
 ## Exactness condition
 
@@ -41,6 +71,24 @@ K * (2^p - 1)^2 < 2^24
 ```
 
 In the default BF16 setting (`p = 7`), this gives `K <= 1040`.
+
+## Safety preflight
+
+`matmul()` and `matmul_numpy()` run a preflight safety check before the Ozaki path.
+An input is considered safe only if all checks pass:
+
+- BF16->FP32 exactness bound: `K * (2^p - 1)^2 < 2^24`
+- Mantissa coverage: `n_slices * p >= 53`
+- Inputs are finite (no `NaN`/`Inf`)
+- Shapes are rank-2 and matmul-compatible
+
+On preflight failure:
+
+- `safe_mode="raise"`: raises `ValueError`
+- `safe_mode="fallback"`: returns plain FP64 `A @ B`
+
+For `pipeline="ondevice"`, preflight uses FP32 extraction constraints and the fixed
+slice configuration (`n_hi=5`, `n_lo=4`).
 
 ## Notes on rho for BF16
 
@@ -63,6 +111,7 @@ The accumulation constraint is also at least 46 for typical `K` values in this p
 ```bash
 python benchmarks/precision.py
 python benchmarks/tpu_validate.py
+python benchmarks/ondevice_validate.py
 ```
 
 ## References
