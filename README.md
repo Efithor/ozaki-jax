@@ -34,6 +34,19 @@ On-device extraction with explicit on-device 2Sum accumulation:
 C = matmul(A, B, pipeline="ondevice", accumulation="ondevice")
 ```
 
+For `accumulation="fused"`, enable JAX x64 before using `matmul`:
+
+```python
+import jax
+jax.config.update("jax_enable_x64", True)
+```
+
+Note: TPU does not provide high-throughput native FP64 in the same way as CPU/GPU
+HPC backends. In this project, fused mode uses x64 primarily for on-device
+`hi/lo` splitting before FP32/BF16-style stages. It can reduce host overhead, but
+speedups are workload and device dependent; profile before treating it as the
+fastest default for a given deployment.
+
 Safety preflight with explicit fallback:
 
 ```python
@@ -59,7 +72,7 @@ Pipeline options:
 
 Accumulation options (`pipeline="ondevice"` only):
 
-- `accumulation="fused"` (default): extraction, GEMMs, and 2Sum accumulation in one JIT call.
+- `accumulation="fused"` (default): split, extraction, GEMMs, and 2Sum accumulation in one JIT call (requires JAX x64 enabled).
 - `accumulation="ondevice"`: separate on-device FP32 2Sum accumulation path.
 - `accumulation="host"`: transfer products and accumulate in FP64 on host.
 

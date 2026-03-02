@@ -1,6 +1,6 @@
 """ozaki-jax public API."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .matmul import matmul, matmul_numpy
 from .extract import (
