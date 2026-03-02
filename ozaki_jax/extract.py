@@ -2,6 +2,12 @@
 
 import numpy as np
 
+try:
+    import jax.numpy as jnp
+    _HAS_JAX = True
+except ImportError:
+    _HAS_JAX = False
+
 
 def _compute_rho(K, m1=53, m2=8, m3=24):
     """Compute the rho lower bound from storage and accumulation constraints."""
@@ -183,3 +189,98 @@ def f32_extract_split_cols(X_f32, rho, n_slices=5):
         scales.append(c_y)
 
     return slices, scales
+
+
+# JAX extraction helpers for the fused on-device pipeline.
+
+
+def jax_extract_split_rows(X_f32, rho, n_slices=5):
+    """Split an FP32 matrix into row-scaled Extract slices (JAX).
+
+    Same algorithm as f32_extract_split_rows but using jnp ops.
+    NOT decorated with @jax.jit — called inside a larger JIT.
+    Python loop is unrolled at trace time.
+
+    Returns:
+        (slices, scales): stacked arrays (n_slices, N, K) and (n_slices, N)
+    """
+    X_f32 = jnp.float32(X_f32)
+    N = X_f32.shape[0]
+    slices = []
+    scales = []
+    residual = X_f32
+
+    for _ in range(n_slices):
+        row_max = jnp.float32(jnp.max(jnp.abs(residual), axis=1))  # (N,)
+
+        zero_mask = (row_max == 0)
+        row_max_safe = jnp.where(zero_mask, jnp.float32(1.0), row_max)
+
+        c_x = jnp.floor(jnp.float32(jnp.log2(row_max_safe)))
+        c_x = jnp.where(zero_mask, jnp.float32(0.0), c_x)
+
+        # Sigma = 0.75 * 2^(rho + c_x) in FP32.
+        sigma = jnp.float32(jnp.float32(0.75) * jnp.ldexp(
+            jnp.ones(N, dtype=jnp.float32),
+            jnp.int32(rho + c_x)))
+        sigma_2d = sigma[:, jnp.newaxis]
+
+        # Sigma trick extracts top bits under FP32 rounding.
+        v = jnp.float32(jnp.float32(residual + sigma_2d) - sigma_2d)
+        v = jnp.where(zero_mask[:, jnp.newaxis], jnp.float32(0.0), v)
+        residual = jnp.float32(residual - v)
+
+        # Normalize by row scales.
+        inv_scale = jnp.float32(jnp.ldexp(
+            jnp.ones(N, dtype=jnp.float32),
+            jnp.int32(-c_x)))
+        v_norm = jnp.float32(v * inv_scale[:, jnp.newaxis])
+
+        slices.append(v_norm)
+        scales.append(c_x)
+
+    return jnp.stack(slices), jnp.stack(scales)
+
+
+def jax_extract_split_cols(X_f32, rho, n_slices=5):
+    """Split an FP32 matrix into column-scaled Extract slices (JAX).
+
+    Same algorithm as f32_extract_split_cols but using jnp ops.
+    NOT decorated with @jax.jit — called inside a larger JIT.
+
+    Returns:
+        (slices, scales): stacked arrays (n_slices, K, M) and (n_slices, M)
+    """
+    X_f32 = jnp.float32(X_f32)
+    M = X_f32.shape[1]
+    slices = []
+    scales = []
+    residual = X_f32
+
+    for _ in range(n_slices):
+        col_max = jnp.float32(jnp.max(jnp.abs(residual), axis=0))  # (M,)
+
+        zero_mask = (col_max == 0)
+        col_max_safe = jnp.where(zero_mask, jnp.float32(1.0), col_max)
+
+        c_y = jnp.floor(jnp.float32(jnp.log2(col_max_safe)))
+        c_y = jnp.where(zero_mask, jnp.float32(0.0), c_y)
+
+        sigma = jnp.float32(jnp.float32(0.75) * jnp.ldexp(
+            jnp.ones(M, dtype=jnp.float32),
+            jnp.int32(rho + c_y)))
+        sigma_2d = sigma[jnp.newaxis, :]
+
+        v = jnp.float32(jnp.float32(residual + sigma_2d) - sigma_2d)
+        v = jnp.where(zero_mask[jnp.newaxis, :], jnp.float32(0.0), v)
+        residual = jnp.float32(residual - v)
+
+        inv_scale = jnp.float32(jnp.ldexp(
+            jnp.ones(M, dtype=jnp.float32),
+            jnp.int32(-c_y)))
+        v_norm = jnp.float32(v * inv_scale[jnp.newaxis, :])
+
+        slices.append(v_norm)
+        scales.append(c_y)
+
+    return jnp.stack(slices), jnp.stack(scales)

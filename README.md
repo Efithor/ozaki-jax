@@ -22,13 +22,13 @@ from ozaki_jax import matmul_numpy
 C = matmul_numpy(A, B)
 ```
 
-On-device extraction path (fixed 65 GEMMs):
+On-device extraction path (fixed 65 GEMMs, default `accumulation="fused"`):
 
 ```python
 C = matmul(A, B, pipeline="ondevice")
 ```
 
-On-device extraction with on-device 2Sum accumulation:
+On-device extraction with explicit on-device 2Sum accumulation:
 
 ```python
 C = matmul(A, B, pipeline="ondevice", accumulation="ondevice")
@@ -57,10 +57,11 @@ Pipeline options:
 - `pipeline="host"` (default): FP64 host extraction, triangular pairing, 36 GEMMs at `n_slices=8`.
 - `pipeline="ondevice"`: FP32 extraction (`hi/lo` split), fixed block structure, 65 GEMMs.
 
-Accumulation options:
+Accumulation options (`pipeline="ondevice"` only):
 
-- `accumulation="host"` (default): FP64 accumulation on host.
-- `accumulation="ondevice"`: on-device FP32 2Sum accumulation (on-device pipeline only).
+- `accumulation="fused"` (default): extraction, GEMMs, and 2Sum accumulation in one JIT call.
+- `accumulation="ondevice"`: separate on-device FP32 2Sum accumulation path.
+- `accumulation="host"`: transfer products and accumulate in FP64 on host.
 
 ## Exactness condition
 
