@@ -266,12 +266,28 @@ def _fully_fused_ondevice_jit(A_f64, B_f64, rho, n_hi, n_lo,
     """Fully fused: split + extraction + GEMMs + accumulation.
 
     Takes 2 FP64 matrices — eliminates CPU double_f32_split bottleneck.
-    Requires JAX x64 mode to be enabled by the caller.
+    Returns (C_hi, C_lo) FP32 pair.
+    Requires jax_enable_x64=True.
     """
     A_hi, A_lo = _jax_double_f32_split(A_f64)
     B_hi, B_lo = _jax_double_f32_split(B_f64)
     return _fused_pipeline_logic(A_hi, A_lo, B_hi, B_lo, rho, n_hi, n_lo,
                                   block_group_sizes)
+
+
+@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5))
+def _fully_fused_f64_jit(A_f64, B_f64, rho, n_hi, n_lo,
+                          block_group_sizes):
+    """Fully fused with FP64 combine. Returns single FP64 JAX array.
+
+    Fuses split + extraction + GEMMs + 2Sum + FP64 combine into one JIT.
+    Avoids separate dispatch and extra PCIe round-trip for the combine.
+    """
+    A_hi, A_lo = _jax_double_f32_split(A_f64)
+    B_hi, B_lo = _jax_double_f32_split(B_f64)
+    C_hi, C_lo = _fused_pipeline_logic(A_hi, A_lo, B_hi, B_lo, rho, n_hi,
+                                        n_lo, block_group_sizes)
+    return jnp.float64(C_hi) + jnp.float64(C_lo)
 
 
 def _accumulate_block_products(products_np, A_hi_scales, A_lo_scales,
@@ -361,7 +377,11 @@ def _ondevice_safety_report(A_f64, B_f64):
             f"={n_hi * max(bits_per_slice, 0)} < 24"
         )
 
-    if not np.isfinite(A_f64).all() or not np.isfinite(B_f64).all():
+    if isinstance(A_f64, jax.Array):
+        if not (bool(jnp.all(jnp.isfinite(A_f64))) and
+                bool(jnp.all(jnp.isfinite(B_f64)))):
+            reasons.append("inputs contain NaN or Inf")
+    elif not np.isfinite(A_f64).all() or not np.isfinite(B_f64).all():
         reasons.append("inputs contain NaN or Inf")
 
     return {
@@ -396,11 +416,12 @@ def _matmul_ondevice(A_f64, B_f64, safe_mode, accumulation="fused"):
     n_hi = report["n_hi"]
     n_lo = report["n_lo"]
 
-    # Fully-fused path: transfer 2 FP64 matrices, split + everything on device.
+    # Fully-fused path: everything on device, returns JAX FP64 array.
+    # jnp.asarray is a no-op for JAX arrays already on device.
     if accumulation == "fused":
         _require_x64_for_fused()
-        A_j = jnp.array(A_f64)
-        B_j = jnp.array(B_f64)
+        A_j = jnp.asarray(A_f64, dtype=jnp.float64)
+        B_j = jnp.asarray(B_f64, dtype=jnp.float64)
 
         block_group_sizes = (
             tuple([n_hi] * n_hi),
@@ -408,14 +429,14 @@ def _matmul_ondevice(A_f64, B_f64, safe_mode, accumulation="fused"):
             tuple([n_hi] * n_lo),
         )
 
-        C_hi, C_lo = _fully_fused_ondevice_jit(
+        return _fully_fused_f64_jit(
             A_j, B_j, rho, n_hi, n_lo, block_group_sizes)
 
-        return np.float64(np.array(C_hi)) + np.float64(np.array(C_lo))
-
-    # 1) Double-FP32 split (for ondevice/host paths).
-    A_hi, A_lo = _double_f32_split(A_f64)
-    B_hi, B_lo = _double_f32_split(B_f64)
+    # 1) Double-FP32 split (for ondevice/host paths — needs numpy).
+    A_np = np.asarray(A_f64, dtype=np.float64)
+    B_np = np.asarray(B_f64, dtype=np.float64)
+    A_hi, A_lo = _double_f32_split(A_np)
+    B_hi, B_lo = _double_f32_split(B_np)
 
     # 2) FP32 Extract split.
     A_hi_slices, A_hi_scales = f32_extract_split_rows(A_hi, rho, n_hi)
@@ -504,24 +525,47 @@ def _matmul_ondevice_numpy(A_f64, B_f64, safe_mode):
         B_hi_scales, B_lo_scales, N, M, n_hi, n_lo, n_hi)
 
 
-def matmul(A_f64, B_f64, n_slices=8, safe_mode="raise", pipeline="host",
+def matmul(A, B, n_slices=8, safe_mode="raise", pipeline="host",
            accumulation="fused"):
     """FP64 matmul via Ozaki Extract.
 
+    Accepts numpy arrays or JAX arrays.
+    For `pipeline='ondevice'`, output type matches input type:
+    numpy inputs -> numpy output, JAX inputs -> JAX output.
+
     Args:
+        A, B: Input matrices of the same array family (both numpy or both JAX).
         pipeline: 'host' or 'ondevice'
         accumulation: 'fused' (split + extraction + GEMMs + accumulation in one
             JIT call; transfers FP64 inputs directly to device), 'ondevice'
             (2Sum on device with CPU split), or 'host' (FP64 on CPU).
             Only used when pipeline='ondevice'; ignored for host pipeline.
     """
-    A_f64 = np.asarray(A_f64, dtype=np.float64)
-    B_f64 = np.asarray(B_f64, dtype=np.float64)
+    a_is_jax = isinstance(A, jax.Array)
+    b_is_jax = isinstance(B, jax.Array)
+    if a_is_jax != b_is_jax:
+        raise ValueError(
+            "A and B must both be numpy arrays or both be JAX arrays."
+        )
+    input_is_jax = a_is_jax
 
     if pipeline == "ondevice":
-        return _matmul_ondevice(A_f64, B_f64, safe_mode, accumulation)
+        if not input_is_jax:
+            A = np.asarray(A, dtype=np.float64)
+            B = np.asarray(B, dtype=np.float64)
+        result = _matmul_ondevice(A, B, safe_mode, accumulation)
+        if not input_is_jax and isinstance(result, jax.Array):
+            return np.asarray(result)
+        if input_is_jax and not isinstance(result, jax.Array):
+            return jnp.asarray(result, dtype=jnp.float64)
+        return result
+
     if pipeline != "host":
         raise ValueError(f"Unknown pipeline={pipeline!r}; expected 'host' or 'ondevice'.")
+
+    # Host pipeline needs numpy arrays.
+    A_f64 = np.asarray(A, dtype=np.float64)
+    B_f64 = np.asarray(B, dtype=np.float64)
 
     report = _ozaki_safety_report(A_f64, B_f64, n_slices)
     fallback = _handle_unsafe_preflight(A_f64, B_f64, report, safe_mode)
