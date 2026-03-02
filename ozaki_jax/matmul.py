@@ -144,6 +144,24 @@ def _validate_accumulation_mode(accumulation):
         )
 
 
+def _is_x64_enabled():
+    """Return whether JAX x64 mode is enabled."""
+    try:
+        return bool(jax.config.read("jax_enable_x64"))
+    except Exception:
+        return bool(getattr(jax.config, "jax_enable_x64", False))
+
+
+def _require_x64_for_fused():
+    """Require JAX x64 for the fully-fused on-device path."""
+    if not _is_x64_enabled():
+        raise ValueError(
+            "accumulation='fused' requires JAX x64 mode. "
+            "Enable it before running matmul, e.g. "
+            "jax.config.update('jax_enable_x64', True)."
+        )
+
+
 # On-device pipeline configuration.
 
 # Fixed config for on-device pipeline
@@ -155,6 +173,18 @@ def _double_f32_split(X_f64):
     """Split FP64 values into `hi + lo` FP32 terms."""
     hi = np.float32(X_f64)
     lo = np.float32(X_f64 - np.float64(hi))
+    return hi, lo
+
+
+def _jax_double_f32_split(X_f64):
+    """Split FP64 values into hi + lo FP32 terms (JAX, no JIT decorator).
+
+    Called inside a larger JIT. On TPU, FP64 is emulated as double-float
+    pairs so jnp.float32(X_f64) is essentially extracting the hi part of
+    the emulation — very cheap.
+    """
+    hi = jnp.float32(X_f64)
+    lo = jnp.float32(X_f64 - jnp.float64(hi))
     return hi, lo
 
 
@@ -178,11 +208,13 @@ def _ondevice_gemms_jit(A_hi_stack, A_lo_stack, B_hi_stack, B_lo_stack,
     return jnp.stack(results)
 
 
-@functools.partial(jax.jit, static_argnums=(4, 5, 6, 7))
-def _fused_ondevice_jit(A_hi, A_lo, B_hi, B_lo, rho, n_hi, n_lo,
-                         block_group_sizes):
-    """Fused extraction + GEMMs + accumulation. Single JIT, single device call."""
+def _fused_pipeline_logic(A_hi, A_lo, B_hi, B_lo, rho, n_hi, n_lo,
+                          block_group_sizes):
+    """Core fused pipeline: extraction + GEMMs + scales + 2Sum (no JIT).
 
+    Called by both _fused_ondevice_jit (4 FP32 inputs) and
+    _fully_fused_ondevice_jit (2 FP64 inputs, split on device).
+    """
     # Phase 1: Extraction (on device).
     A_hi_sl, A_hi_sc = jax_extract_split_rows(A_hi, rho, n_hi)
     A_lo_sl, A_lo_sc = jax_extract_split_rows(A_lo, rho, n_lo)
@@ -217,6 +249,28 @@ def _fused_ondevice_jit(A_hi, A_lo, B_hi, B_lo, rho, n_hi, n_lo,
 
     # Phase 4: 2Sum accumulation (reuse extracted logic).
     return _accumulate_2sum_logic(products, col_scales, row_scales,
+                                  block_group_sizes)
+
+
+@functools.partial(jax.jit, static_argnums=(4, 5, 6, 7))
+def _fused_ondevice_jit(A_hi, A_lo, B_hi, B_lo, rho, n_hi, n_lo,
+                         block_group_sizes):
+    """Fused extraction + GEMMs + accumulation. Takes 4 FP32 inputs."""
+    return _fused_pipeline_logic(A_hi, A_lo, B_hi, B_lo, rho, n_hi, n_lo,
+                                  block_group_sizes)
+
+
+@functools.partial(jax.jit, static_argnums=(2, 3, 4, 5))
+def _fully_fused_ondevice_jit(A_f64, B_f64, rho, n_hi, n_lo,
+                               block_group_sizes):
+    """Fully fused: split + extraction + GEMMs + accumulation.
+
+    Takes 2 FP64 matrices — eliminates CPU double_f32_split bottleneck.
+    Requires JAX x64 mode to be enabled by the caller.
+    """
+    A_hi, A_lo = _jax_double_f32_split(A_f64)
+    B_hi, B_lo = _jax_double_f32_split(B_f64)
+    return _fused_pipeline_logic(A_hi, A_lo, B_hi, B_lo, rho, n_hi, n_lo,
                                   block_group_sizes)
 
 
@@ -342,16 +396,11 @@ def _matmul_ondevice(A_f64, B_f64, safe_mode, accumulation="fused"):
     n_hi = report["n_hi"]
     n_lo = report["n_lo"]
 
-    # 1) Double-FP32 split.
-    A_hi, A_lo = _double_f32_split(A_f64)
-    B_hi, B_lo = _double_f32_split(B_f64)
-
-    # Fused path: transfer 4 FP32 matrices, do everything on device.
+    # Fully-fused path: transfer 2 FP64 matrices, split + everything on device.
     if accumulation == "fused":
-        A_hi_j = jnp.array(A_hi)
-        A_lo_j = jnp.array(A_lo)
-        B_hi_j = jnp.array(B_hi)
-        B_lo_j = jnp.array(B_lo)
+        _require_x64_for_fused()
+        A_j = jnp.array(A_f64)
+        B_j = jnp.array(B_f64)
 
         block_group_sizes = (
             tuple([n_hi] * n_hi),
@@ -359,11 +408,14 @@ def _matmul_ondevice(A_f64, B_f64, safe_mode, accumulation="fused"):
             tuple([n_hi] * n_lo),
         )
 
-        C_hi, C_lo = _fused_ondevice_jit(
-            A_hi_j, A_lo_j, B_hi_j, B_lo_j,
-            rho, n_hi, n_lo, block_group_sizes)
+        C_hi, C_lo = _fully_fused_ondevice_jit(
+            A_j, B_j, rho, n_hi, n_lo, block_group_sizes)
 
         return np.float64(np.array(C_hi)) + np.float64(np.array(C_lo))
+
+    # 1) Double-FP32 split (for ondevice/host paths).
+    A_hi, A_lo = _double_f32_split(A_f64)
+    B_hi, B_lo = _double_f32_split(B_f64)
 
     # 2) FP32 Extract split.
     A_hi_slices, A_hi_scales = f32_extract_split_rows(A_hi, rho, n_hi)
@@ -458,8 +510,9 @@ def matmul(A_f64, B_f64, n_slices=8, safe_mode="raise", pipeline="host",
 
     Args:
         pipeline: 'host' or 'ondevice'
-        accumulation: 'fused' (extraction + GEMMs + accumulation in one JIT call),
-            'ondevice' (2Sum on device), or 'host' (FP64 on CPU).
+        accumulation: 'fused' (split + extraction + GEMMs + accumulation in one
+            JIT call; transfers FP64 inputs directly to device), 'ondevice'
+            (2Sum on device with CPU split), or 'host' (FP64 on CPU).
             Only used when pipeline='ondevice'; ignored for host pipeline.
     """
     A_f64 = np.asarray(A_f64, dtype=np.float64)
