@@ -1,6 +1,7 @@
 """CPU-only CI smoke checks for ozaki-jax."""
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 # Fused on-device path requires x64; set before importing ozaki_jax.
@@ -44,6 +45,30 @@ def main():
     assert_leq(rel_err(C_ondev_dev, C_ref), 1e-9, "ondevice+ondevice accuracy")
     assert_leq(rel_err(C_ondev_fused, C_ref), 1e-9, "ondevice+fused accuracy")
     assert_leq(rel_err(C_ondev_fused, C_ondev_dev), 1e-9, "fused vs ondevice parity")
+
+    # JAX-input on-device path should keep JAX outputs for all accumulation modes.
+    A_j = jnp.asarray(A, dtype=jnp.float64)
+    B_j = jnp.asarray(B, dtype=jnp.float64)
+    Cj_fused = matmul(A_j, B_j, pipeline="ondevice", accumulation="fused")
+    Cj_ondev = matmul(A_j, B_j, pipeline="ondevice", accumulation="ondevice")
+    Cj_host = matmul(A_j, B_j, pipeline="ondevice", accumulation="host")
+    if not isinstance(Cj_fused, jax.Array):
+        raise AssertionError("JAX-input fused path did not return JAX array")
+    if not isinstance(Cj_ondev, jax.Array):
+        raise AssertionError("JAX-input ondevice path did not return JAX array")
+    if not isinstance(Cj_host, jax.Array):
+        raise AssertionError("JAX-input host-acc path did not return JAX array")
+    assert_leq(rel_err(np.asarray(Cj_fused), C_ref), 1e-9, "jax fused accuracy")
+    assert_leq(rel_err(np.asarray(Cj_ondev), C_ref), 1e-9, "jax ondevice accuracy")
+    assert_leq(rel_err(np.asarray(Cj_host), C_ref), 1e-14, "jax host-acc accuracy")
+
+    # Mixed array families must be rejected.
+    try:
+        _ = matmul(A_j, B, pipeline="ondevice", accumulation="fused")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("mixed input types did not raise ValueError")
 
     # Ensure invalid accumulation values are rejected explicitly.
     try:
