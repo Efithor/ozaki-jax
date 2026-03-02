@@ -403,7 +403,7 @@ def validate_accumulation_2sum(N=128, M=128, K=128):
     """
     from .matmul import (
         _double_f32_split, _accumulate_block_products,
-        _ONDEVICE_N_HI, _ONDEVICE_N_LO,
+        _PRECISION_PRESETS,
     )
     from .extract import _compute_rho_f32, f32_extract_split_rows, f32_extract_split_cols
 
@@ -412,8 +412,7 @@ def validate_accumulation_2sum(N=128, M=128, K=128):
     B = rng.randn(K, M).astype(np.float64)
     C_exact = A @ B
 
-    n_hi = _ONDEVICE_N_HI
-    n_lo = _ONDEVICE_N_LO
+    n_hi, n_lo = _PRECISION_PRESETS["max"]
     rho = _compute_rho_f32(K)
 
     A_hi, A_lo = _double_f32_split(A)

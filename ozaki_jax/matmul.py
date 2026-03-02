@@ -162,11 +162,36 @@ def _require_x64_for_fused():
         )
 
 
-# On-device pipeline configuration.
+# On-device pipeline precision presets.
+# Each maps to (n_hi, n_lo): number of hi/lo extraction slices.
+# More slices = more GEMMs = higher accuracy but slower.
+_PRECISION_PRESETS = {
+    "high":   (4, 1),  # 24 GEMMs, ~9.5 digits
+    "medium": (3, 1),  # 15 GEMMs, ~7 digits
+    "max":    (5, 4),  # 65 GEMMs, ~10 digits
+}
 
-# Fixed config for on-device pipeline
-_ONDEVICE_N_HI = 5
-_ONDEVICE_N_LO = 4
+
+def _resolve_precision(precision):
+    """Resolve precision preset name to (n_hi, n_lo) config.
+
+    Accepts a preset name ('high', 'medium', 'max') or a custom
+    (n_hi, n_lo) tuple where both values are >= 1.
+    """
+    if isinstance(precision, tuple) and len(precision) == 2:
+        n_hi, n_lo = precision
+        if n_hi < 1 or n_lo < 1:
+            raise ValueError(
+                f"Custom precision tuple must have n_hi >= 1 and n_lo >= 1, "
+                f"got ({n_hi}, {n_lo})."
+            )
+        return precision
+    if precision not in _PRECISION_PRESETS:
+        raise ValueError(
+            f"Unknown precision={precision!r}; expected one of "
+            f"{sorted(_PRECISION_PRESETS)} or a (n_hi, n_lo) tuple."
+        )
+    return _PRECISION_PRESETS[precision]
 
 
 def _double_f32_split(X_f64):
@@ -210,44 +235,46 @@ def _ondevice_gemms_jit(A_hi_stack, A_lo_stack, B_hi_stack, B_lo_stack,
 
 def _fused_pipeline_logic(A_hi, A_lo, B_hi, B_lo, rho, n_hi, n_lo,
                           block_group_sizes):
-    """Core fused pipeline: extraction + GEMMs + scales + 2Sum (no JIT).
+    """Core fused pipeline: extraction + broadcast GEMMs + scales + 2Sum.
 
     Called by both _fused_ondevice_jit (4 FP32 inputs) and
     _fully_fused_ondevice_jit (2 FP64 inputs, split on device).
+    Uses broadcast matmul for better MXU pipelining on TPU.
     """
     # Phase 1: Extraction (on device).
     A_hi_sl, A_hi_sc = jax_extract_split_rows(A_hi, rho, n_hi)
-    A_lo_sl, A_lo_sc = jax_extract_split_rows(A_lo, rho, n_lo)
     B_hi_sl, B_hi_sc = jax_extract_split_cols(B_hi, rho, n_hi)
-    B_lo_sl, B_lo_sc = jax_extract_split_cols(B_lo, rho, n_lo)
 
-    # Phase 2: GEMMs (inline).
-    products = []
-    for i in range(n_hi):
-        for j in range(n_hi):
-            products.append(jnp.dot(A_hi_sl[i], B_hi_sl[j]))
-    for i in range(n_hi):
-        for j in range(n_lo):
-            products.append(jnp.dot(A_hi_sl[i], B_lo_sl[j]))
-    for i in range(n_lo):
-        for j in range(n_hi):
-            products.append(jnp.dot(A_lo_sl[i], B_hi_sl[j]))
-    products = jnp.stack(products)  # (65, N, M)
+    # Phase 2: Broadcast-batched GEMMs.
+    # hi × hi: (n_hi, 1, N, K) @ (1, n_hi, K, M) → (n_hi, n_hi, N, M)
+    hh = jnp.matmul(A_hi_sl[:, None, :, :], B_hi_sl[None, :, :, :])
+    parts = [hh.reshape(-1, hh.shape[-2], hh.shape[-1])]
+
+    if n_lo > 0:
+        A_lo_sl, A_lo_sc = jax_extract_split_rows(A_lo, rho, n_lo)
+        B_lo_sl, B_lo_sc = jax_extract_split_cols(B_lo, rho, n_lo)
+
+        hl = jnp.matmul(A_hi_sl[:, None, :, :], B_lo_sl[None, :, :, :])
+        parts.append(hl.reshape(-1, hl.shape[-2], hl.shape[-1]))
+        lh = jnp.matmul(A_lo_sl[:, None, :, :], B_hi_sl[None, :, :, :])
+        parts.append(lh.reshape(-1, lh.shape[-2], lh.shape[-1]))
+
+    products = jnp.concatenate(parts, axis=0)
 
     # Phase 3: Scale precomputation (on device).
-    col_scales = jnp.exp2(jnp.concatenate([
-        jnp.tile(B_hi_sc, (n_hi, 1)),   # (25, M)
-        jnp.tile(B_lo_sc, (n_hi, 1)),   # (20, M)
-        jnp.tile(B_hi_sc, (n_lo, 1)),   # (20, M)
-    ], axis=0))                           # (65, M)
+    col_parts = [jnp.tile(B_hi_sc, (n_hi, 1))]
+    row_parts = [A_hi_sc]
 
-    row_scales = jnp.exp2(jnp.concatenate([
-        A_hi_sc,   # (5, N) — hixhi groups
-        A_hi_sc,   # (5, N) — hixlo groups (same row scales)
-        A_lo_sc,   # (4, N) — loxhi groups
-    ], axis=0))    # (14, N)
+    if n_lo > 0:
+        col_parts.append(jnp.tile(B_lo_sc, (n_hi, 1)))
+        col_parts.append(jnp.tile(B_hi_sc, (n_lo, 1)))
+        row_parts.append(A_hi_sc)
+        row_parts.append(A_lo_sc)
 
-    # Phase 4: 2Sum accumulation (reuse extracted logic).
+    col_scales = jnp.exp2(jnp.concatenate(col_parts, axis=0))
+    row_scales = jnp.exp2(jnp.concatenate(row_parts, axis=0))
+
+    # Phase 4: 2Sum accumulation.
     return _accumulate_2sum_logic(products, col_scales, row_scales,
                                   block_group_sizes)
 
@@ -347,7 +374,7 @@ def _accumulate_block_products(products_np, A_hi_scales, A_lo_scales,
     return C
 
 
-def _ondevice_safety_report(A_f64, B_f64):
+def _ondevice_safety_report(A_f64, B_f64, n_hi, n_lo):
     """Return safety checks for the on-device pipeline."""
     _validate_shapes(A_f64, B_f64)
     K = A_f64.shape[1]
@@ -370,13 +397,6 @@ def _ondevice_safety_report(A_f64, B_f64):
                 f"(need K <= {max_K})"
             )
 
-    n_hi = _ONDEVICE_N_HI
-    if n_hi * max(bits_per_slice, 0) < 24:
-        reasons.append(
-            f"insufficient hi slice budget: {n_hi}*{max(bits_per_slice, 0)}"
-            f"={n_hi * max(bits_per_slice, 0)} < 24"
-        )
-
     if isinstance(A_f64, jax.Array):
         if not (bool(jnp.all(jnp.isfinite(A_f64))) and
                 bool(jnp.all(jnp.isfinite(B_f64)))):
@@ -388,24 +408,25 @@ def _ondevice_safety_report(A_f64, B_f64):
         "safe": len(reasons) == 0,
         "rho": rho,
         "bits_per_slice": bits_per_slice,
-        "n_hi": _ONDEVICE_N_HI,
-        "n_lo": _ONDEVICE_N_LO,
-        "n_gemms": (_ONDEVICE_N_HI * _ONDEVICE_N_HI +
-                    _ONDEVICE_N_HI * _ONDEVICE_N_LO +
-                    _ONDEVICE_N_LO * _ONDEVICE_N_HI),
+        "n_hi": n_hi,
+        "n_lo": n_lo,
+        "n_gemms": n_hi * n_hi + n_hi * n_lo + n_lo * n_hi,
         "reasons": reasons,
     }
 
 
-def _matmul_ondevice(A_f64, B_f64, safe_mode, accumulation="fused"):
-    """On-device path: FP32 extraction and fixed GEMM blocks.
+def _matmul_ondevice(A_f64, B_f64, safe_mode, accumulation="fused",
+                     n_hi=4, n_lo=1):
+    """On-device path: FP32 extraction and configurable GEMM blocks.
 
     Args:
         accumulation: 'fused' (extraction + GEMMs + accumulation in one JIT call),
             'ondevice' (2Sum on device), or 'host' (FP64 on CPU)
+        n_hi: Number of hi extraction slices (from precision preset).
+        n_lo: Number of lo extraction slices (from precision preset).
     """
     _validate_accumulation_mode(accumulation)
-    report = _ondevice_safety_report(A_f64, B_f64)
+    report = _ondevice_safety_report(A_f64, B_f64, n_hi, n_lo)
     fallback = _handle_unsafe_preflight(A_f64, B_f64, report, safe_mode)
     if fallback is not None:
         return fallback
@@ -425,8 +446,8 @@ def _matmul_ondevice(A_f64, B_f64, safe_mode, accumulation="fused"):
 
         block_group_sizes = (
             tuple([n_hi] * n_hi),
-            tuple([n_lo] * n_hi),
-            tuple([n_hi] * n_lo),
+            tuple([n_lo] * n_hi) if n_lo > 0 else (),
+            tuple([n_hi] * n_lo) if n_lo > 0 else (),
         )
 
         return _fully_fused_f64_jit(
@@ -475,9 +496,9 @@ def _matmul_ondevice(A_f64, B_f64, safe_mode, accumulation="fused"):
         B_hi_scales, B_lo_scales, N, M, n_hi, n_lo, n_hi)
 
 
-def _matmul_ondevice_numpy(A_f64, B_f64, safe_mode):
+def _matmul_ondevice_numpy(A_f64, B_f64, safe_mode, n_hi=4, n_lo=1):
     """On-device path implemented with NumPy GEMMs for testing."""
-    report = _ondevice_safety_report(A_f64, B_f64)
+    report = _ondevice_safety_report(A_f64, B_f64, n_hi, n_lo)
     fallback = _handle_unsafe_preflight(A_f64, B_f64, report, safe_mode)
     if fallback is not None:
         return fallback
@@ -526,7 +547,7 @@ def _matmul_ondevice_numpy(A_f64, B_f64, safe_mode):
 
 
 def matmul(A, B, n_slices=8, safe_mode="raise", pipeline="host",
-           accumulation="fused"):
+           accumulation="fused", precision="high"):
     """FP64 matmul via Ozaki Extract.
 
     Accepts numpy arrays or JAX arrays.
@@ -540,6 +561,11 @@ def matmul(A, B, n_slices=8, safe_mode="raise", pipeline="host",
             JIT call; transfers FP64 inputs directly to device), 'ondevice'
             (2Sum on device with CPU split), or 'host' (FP64 on CPU).
             Only used when pipeline='ondevice'; ignored for host pipeline.
+        precision: Accuracy/speed tradeoff for on-device pipeline.
+            'high' (default): 24 GEMMs, ~9.5 correct digits.
+            'medium': 15 GEMMs, ~7 correct digits (FP32-level).
+            'max': 65 GEMMs, ~10 correct digits.
+            Also accepts a custom (n_hi, n_lo) tuple.
     """
     a_is_jax = isinstance(A, jax.Array)
     b_is_jax = isinstance(B, jax.Array)
@@ -550,10 +576,11 @@ def matmul(A, B, n_slices=8, safe_mode="raise", pipeline="host",
     input_is_jax = a_is_jax
 
     if pipeline == "ondevice":
+        n_hi, n_lo = _resolve_precision(precision)
         if not input_is_jax:
             A = np.asarray(A, dtype=np.float64)
             B = np.asarray(B, dtype=np.float64)
-        result = _matmul_ondevice(A, B, safe_mode, accumulation)
+        result = _matmul_ondevice(A, B, safe_mode, accumulation, n_hi, n_lo)
         if not input_is_jax and isinstance(result, jax.Array):
             return np.asarray(result)
         if input_is_jax and not isinstance(result, jax.Array):
@@ -591,13 +618,15 @@ def matmul(A, B, n_slices=8, safe_mode="raise", pipeline="host",
     return _accumulate_products(products_np, A_scales, B_scales, N, M, n_slices)
 
 
-def matmul_numpy(A_f64, B_f64, n_slices=8, safe_mode="raise", pipeline="host"):
+def matmul_numpy(A_f64, B_f64, n_slices=8, safe_mode="raise", pipeline="host",
+                 precision="high"):
     """NumPy implementation of `matmul` with matching pipeline options."""
     A_f64 = np.asarray(A_f64, dtype=np.float64)
     B_f64 = np.asarray(B_f64, dtype=np.float64)
 
     if pipeline == "ondevice":
-        return _matmul_ondevice_numpy(A_f64, B_f64, safe_mode)
+        n_hi, n_lo = _resolve_precision(precision)
+        return _matmul_ondevice_numpy(A_f64, B_f64, safe_mode, n_hi, n_lo)
     if pipeline != "host":
         raise ValueError(f"Unknown pipeline={pipeline!r}; expected 'host' or 'ondevice'.")
 
