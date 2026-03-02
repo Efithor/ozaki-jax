@@ -1,6 +1,10 @@
 """CPU-only CI smoke checks for ozaki-jax."""
 
+import jax
 import numpy as np
+
+# Fused on-device path requires x64; set before importing ozaki_jax.
+jax.config.update("jax_enable_x64", True)
 
 from ozaki_jax import matmul, matmul_numpy
 
