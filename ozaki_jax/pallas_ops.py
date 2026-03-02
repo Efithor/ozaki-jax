@@ -175,21 +175,16 @@ def _precompute_accumulation_scales(A_hi_scales, A_lo_scales,
     return col_scales_f32, row_scales_f32, block_group_sizes
 
 
-@functools.partial(jax.jit, static_argnums=(3,))
-def _jax_accumulate_2sum(products, col_scales, row_scales, block_group_sizes):
-    """Accumulate GEMM products using 2Sum error-free transformation in FP32.
+def _accumulate_2sum_logic(products, col_scales, row_scales, block_group_sizes):
+    """Core 2Sum accumulation logic (no JIT).
 
-    Uses block-level accumulation: each of the 3 GEMM blocks (hixhi,
-    hixlo, loxhi) is accumulated into its own (hi, lo) pair, then the
-    3 pairs are combined. This prevents the large hixhi error terms from
-    drowning the smaller cross-term contributions in the lo accumulator.
+    Called by both the standalone JIT wrapper and the fused pipeline.
 
     Args:
         products: (n_products, N, M) FP32 — raw GEMM outputs
         col_scales: (n_products, M) FP32 — per-product column scales
         row_scales: (n_groups, N) FP32 — per-group row scales
         block_group_sizes: tuple of tuples — ((sizes for hixhi), (hixlo), (loxhi))
-            Static argument traced at compile time.
 
     Returns:
         (C_hi, C_lo): FP32 arrays of shape (N, M)
@@ -242,6 +237,13 @@ def _jax_accumulate_2sum(products, col_scales, row_scales, block_group_sizes):
         C_hi, C_lo = twosum_add(C_hi, C_lo, blk_lo)
 
     return C_hi, C_lo
+
+
+@functools.partial(jax.jit, static_argnums=(3,))
+def _jax_accumulate_2sum(products, col_scales, row_scales, block_group_sizes):
+    """Standalone JIT wrapper for 2Sum accumulation (backward compat)."""
+    return _accumulate_2sum_logic(products, col_scales, row_scales,
+                                  block_group_sizes)
 
 
 def _pallas_accumulate_2sum_kernel(products_ref, col_scales_ref,

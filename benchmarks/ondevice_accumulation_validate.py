@@ -4,9 +4,10 @@ Tests:
   1. 2Sum accuracy vs FP64 baseline at multiple sizes
   2. Scale precomputation shape verification
   3. Transfer reduction (2×N×M vs 65×N×M)
-  4. End-to-end matmul with on-device accumulation
-  5. Timing: host vs on-device accumulation
+  4. End-to-end matmul with on-device accumulation (host, ondevice, fused)
+  5. Timing: host vs on-device vs fused accumulation
   6. Pallas backend validation (if available)
+  7. JAX extraction vs numpy extraction bit-exactness
 
 Usage:
     python benchmarks/ondevice_accumulation_validate.py
@@ -40,6 +41,8 @@ from ozaki_jax.extract import (
     _compute_rho_f32,
     f32_extract_split_rows,
     f32_extract_split_cols,
+    jax_extract_split_rows,
+    jax_extract_split_cols,
 )
 
 
@@ -147,12 +150,13 @@ def main():
             ("host", matmul(A, B, pipeline="host")),
             ("ondev+host_acc", matmul(A, B, pipeline="ondevice", accumulation="host")),
             ("ondev+dev_acc", matmul(A, B, pipeline="ondevice", accumulation="ondevice")),
+            ("ondev+fused", matmul(A, B, pipeline="ondevice", accumulation="fused")),
         ]
 
         for label, C in configs:
             err = rel_err(C, C_exact)
             # On-device FP32 2Sum achieves ~1e-10; host FP64 paths achieve ~1e-15.
-            threshold = 1e-9 if "dev_acc" in label else 1e-14
+            threshold = 1e-9 if ("dev_acc" in label or "fused" in label) else 1e-14
             ok = err < threshold
             if not ok:
                 all_pass = False
@@ -163,7 +167,7 @@ def main():
     # ----------------------------------------------------------------
     # Test 5: Timing comparison
     # ----------------------------------------------------------------
-    print("test 5: timing (host vs on-device accumulation)\n")
+    print("test 5: timing (host vs on-device vs fused accumulation)\n")
 
     for N_test in [256, 512]:
         A = rng.randn(N_test, N_test).astype(np.float64)
@@ -172,6 +176,7 @@ def main():
         # Warm up.
         _ = matmul(A, B, pipeline="ondevice", accumulation="host")
         _ = matmul(A, B, pipeline="ondevice", accumulation="ondevice")
+        _ = matmul(A, B, pipeline="ondevice", accumulation="fused")
 
         n_iter = 10
 
@@ -187,12 +192,21 @@ def main():
             C = matmul(A, B, pipeline="ondevice", accumulation="ondevice")
             times_dev.append(time.perf_counter() - t0)
 
+        times_fused = []
+        for _ in range(n_iter):
+            t0 = time.perf_counter()
+            C = matmul(A, B, pipeline="ondevice", accumulation="fused")
+            times_fused.append(time.perf_counter() - t0)
+
         t_host = np.median(times_host) * 1000
         t_dev = np.median(times_dev) * 1000
-        speedup = t_host / t_dev if t_dev > 0 else 0
+        t_fused = np.median(times_fused) * 1000
+        speedup_dev = t_host / t_dev if t_dev > 0 else 0
+        speedup_fused = t_host / t_fused if t_fused > 0 else 0
 
-        print(f"  n={N_test}: host_acc={t_host:.1f}ms  "
-              f"dev_acc={t_dev:.1f}ms  speedup={speedup:.2f}x")
+        print(f"  n={N_test}: host={t_host:.1f}ms  "
+              f"ondevice={t_dev:.1f}ms ({speedup_dev:.2f}x)  "
+              f"fused={t_fused:.1f}ms ({speedup_fused:.2f}x)")
     print()
 
     # ----------------------------------------------------------------
@@ -262,6 +276,41 @@ def main():
             print(f"  Match: {'PASS' if ok else 'FAIL'}")
         except Exception as e:
             print(f"  Pallas error: {e}")
+    print()
+
+    # ----------------------------------------------------------------
+    # Test 7: JAX extraction vs numpy extraction bit-exactness
+    # ----------------------------------------------------------------
+    print("test 7: JAX extraction vs numpy extraction bit-exactness\n")
+
+    N_test = 64
+    K_test = 64
+    X = rng.randn(N_test, K_test).astype(np.float32)
+    Y = rng.randn(K_test, N_test).astype(np.float32)
+    rho_test = _compute_rho_f32(K_test)
+
+    for n_sl, label in [(5, "n_hi=5"), (4, "n_lo=4")]:
+        # Rows.
+        np_sl, np_sc = f32_extract_split_rows(X, rho_test, n_sl)
+        jax_sl, jax_sc = jax_extract_split_rows(jnp.array(X), rho_test, n_sl)
+        sl_diff = float(np.max(np.abs(np.array(jax_sl) - np.stack(np_sl))))
+        sc_diff = float(np.max(np.abs(np.array(jax_sc) - np.stack(np_sc))))
+        ok_rows = sl_diff == 0.0 and sc_diff == 0.0
+        if not ok_rows:
+            all_pass = False
+        print(f"  rows {label}: slice_diff={sl_diff}  scale_diff={sc_diff}  "
+              f"{'PASS' if ok_rows else 'FAIL'}")
+
+        # Cols.
+        np_sl_c, np_sc_c = f32_extract_split_cols(Y, rho_test, n_sl)
+        jax_sl_c, jax_sc_c = jax_extract_split_cols(jnp.array(Y), rho_test, n_sl)
+        sl_diff_c = float(np.max(np.abs(np.array(jax_sl_c) - np.stack(np_sl_c))))
+        sc_diff_c = float(np.max(np.abs(np.array(jax_sc_c) - np.stack(np_sc_c))))
+        ok_cols = sl_diff_c == 0.0 and sc_diff_c == 0.0
+        if not ok_cols:
+            all_pass = False
+        print(f"  cols {label}: slice_diff={sl_diff_c}  scale_diff={sc_diff_c}  "
+              f"{'PASS' if ok_cols else 'FAIL'}")
     print()
 
     # ----------------------------------------------------------------

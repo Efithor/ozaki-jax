@@ -12,8 +12,12 @@ import numpy as np
 from .extract import (
     _compute_rho, extract_split_rows, extract_split_cols,
     _compute_rho_f32, f32_extract_split_rows, f32_extract_split_cols,
+    jax_extract_split_rows, jax_extract_split_cols,
 )
-from .pallas_ops import _precompute_accumulation_scales, accumulate_2sum
+from .pallas_ops import (
+    _precompute_accumulation_scales, accumulate_2sum,
+    _accumulate_2sum_logic,
+)
 
 
 @functools.partial(jax.jit, static_argnums=(2,))
@@ -131,6 +135,15 @@ def _handle_unsafe_preflight(A_f64, B_f64, report, safe_mode):
     raise ValueError(message)
 
 
+def _validate_accumulation_mode(accumulation):
+    """Validate accumulation mode for on-device pipeline."""
+    allowed = {"fused", "ondevice", "host"}
+    if accumulation not in allowed:
+        raise ValueError(
+            f"Unknown accumulation={accumulation!r}; expected one of {sorted(allowed)}."
+        )
+
+
 # On-device pipeline configuration.
 
 # Fixed config for on-device pipeline
@@ -163,6 +176,48 @@ def _ondevice_gemms_jit(A_hi_stack, A_lo_stack, B_hi_stack, B_lo_stack,
         for j in range(n_hi_b):
             results.append(jnp.dot(A_lo_stack[i], B_hi_stack[j]))
     return jnp.stack(results)
+
+
+@functools.partial(jax.jit, static_argnums=(4, 5, 6, 7))
+def _fused_ondevice_jit(A_hi, A_lo, B_hi, B_lo, rho, n_hi, n_lo,
+                         block_group_sizes):
+    """Fused extraction + GEMMs + accumulation. Single JIT, single device call."""
+
+    # Phase 1: Extraction (on device).
+    A_hi_sl, A_hi_sc = jax_extract_split_rows(A_hi, rho, n_hi)
+    A_lo_sl, A_lo_sc = jax_extract_split_rows(A_lo, rho, n_lo)
+    B_hi_sl, B_hi_sc = jax_extract_split_cols(B_hi, rho, n_hi)
+    B_lo_sl, B_lo_sc = jax_extract_split_cols(B_lo, rho, n_lo)
+
+    # Phase 2: GEMMs (inline).
+    products = []
+    for i in range(n_hi):
+        for j in range(n_hi):
+            products.append(jnp.dot(A_hi_sl[i], B_hi_sl[j]))
+    for i in range(n_hi):
+        for j in range(n_lo):
+            products.append(jnp.dot(A_hi_sl[i], B_lo_sl[j]))
+    for i in range(n_lo):
+        for j in range(n_hi):
+            products.append(jnp.dot(A_lo_sl[i], B_hi_sl[j]))
+    products = jnp.stack(products)  # (65, N, M)
+
+    # Phase 3: Scale precomputation (on device).
+    col_scales = jnp.exp2(jnp.concatenate([
+        jnp.tile(B_hi_sc, (n_hi, 1)),   # (25, M)
+        jnp.tile(B_lo_sc, (n_hi, 1)),   # (20, M)
+        jnp.tile(B_hi_sc, (n_lo, 1)),   # (20, M)
+    ], axis=0))                           # (65, M)
+
+    row_scales = jnp.exp2(jnp.concatenate([
+        A_hi_sc,   # (5, N) — hixhi groups
+        A_hi_sc,   # (5, N) — hixlo groups (same row scales)
+        A_lo_sc,   # (4, N) — loxhi groups
+    ], axis=0))    # (14, N)
+
+    # Phase 4: 2Sum accumulation (reuse extracted logic).
+    return _accumulate_2sum_logic(products, col_scales, row_scales,
+                                  block_group_sizes)
 
 
 def _accumulate_block_products(products_np, A_hi_scales, A_lo_scales,
@@ -268,12 +323,14 @@ def _ondevice_safety_report(A_f64, B_f64):
     }
 
 
-def _matmul_ondevice(A_f64, B_f64, safe_mode, accumulation="host"):
+def _matmul_ondevice(A_f64, B_f64, safe_mode, accumulation="fused"):
     """On-device path: FP32 extraction and fixed GEMM blocks.
 
     Args:
-        accumulation: 'host' (FP64 on CPU) or 'ondevice' (2Sum on device)
+        accumulation: 'fused' (extraction + GEMMs + accumulation in one JIT call),
+            'ondevice' (2Sum on device), or 'host' (FP64 on CPU)
     """
+    _validate_accumulation_mode(accumulation)
     report = _ondevice_safety_report(A_f64, B_f64)
     fallback = _handle_unsafe_preflight(A_f64, B_f64, report, safe_mode)
     if fallback is not None:
@@ -288,6 +345,25 @@ def _matmul_ondevice(A_f64, B_f64, safe_mode, accumulation="host"):
     # 1) Double-FP32 split.
     A_hi, A_lo = _double_f32_split(A_f64)
     B_hi, B_lo = _double_f32_split(B_f64)
+
+    # Fused path: transfer 4 FP32 matrices, do everything on device.
+    if accumulation == "fused":
+        A_hi_j = jnp.array(A_hi)
+        A_lo_j = jnp.array(A_lo)
+        B_hi_j = jnp.array(B_hi)
+        B_lo_j = jnp.array(B_lo)
+
+        block_group_sizes = (
+            tuple([n_hi] * n_hi),
+            tuple([n_lo] * n_hi),
+            tuple([n_hi] * n_lo),
+        )
+
+        C_hi, C_lo = _fused_ondevice_jit(
+            A_hi_j, A_lo_j, B_hi_j, B_lo_j,
+            rho, n_hi, n_lo, block_group_sizes)
+
+        return np.float64(np.array(C_hi)) + np.float64(np.array(C_lo))
 
     # 2) FP32 Extract split.
     A_hi_slices, A_hi_scales = f32_extract_split_rows(A_hi, rho, n_hi)
@@ -377,12 +453,13 @@ def _matmul_ondevice_numpy(A_f64, B_f64, safe_mode):
 
 
 def matmul(A_f64, B_f64, n_slices=8, safe_mode="raise", pipeline="host",
-           accumulation="host"):
+           accumulation="fused"):
     """FP64 matmul via Ozaki Extract.
 
     Args:
         pipeline: 'host' or 'ondevice'
-        accumulation: 'host' (FP64 on CPU) or 'ondevice' (2Sum on device).
+        accumulation: 'fused' (extraction + GEMMs + accumulation in one JIT call),
+            'ondevice' (2Sum on device), or 'host' (FP64 on CPU).
             Only used when pipeline='ondevice'; ignored for host pipeline.
     """
     A_f64 = np.asarray(A_f64, dtype=np.float64)
