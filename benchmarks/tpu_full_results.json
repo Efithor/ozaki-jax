@@ -1,0 +1,338 @@
+{
+  "tests": [
+    {
+      "name": "matmul bf16_interleaved n=64",
+      "error": 3.0028314327271006e-16,
+      "digits": 15.522469046719172,
+      "threshold": 1e-09,
+      "pass": true,
+      "time_ms": 2.940375001344364
+    },
+    {
+      "name": "matmul fused n=64",
+      "error": 3.0028314327271006e-16,
+      "digits": 15.522469046719172,
+      "threshold": 1e-09,
+      "pass": true,
+      "time_ms": 2.7446790008980315
+    },
+    {
+      "name": "matmul bf16_interleaved n=128",
+      "error": 3.9591795988636415e-16,
+      "digits": 15.402394797053985,
+      "threshold": 1e-09,
+      "pass": true,
+      "time_ms": 6.117411998275202
+    },
+    {
+      "name": "matmul fused n=128",
+      "error": 3.9591795988636415e-16,
+      "digits": 15.402394797053985,
+      "threshold": 1e-09,
+      "pass": true,
+      "time_ms": 8.151091999025084
+    },
+    {
+      "name": "matmul bf16_interleaved n=256",
+      "error": 5.54202389013648e-16,
+      "digits": 15.25633160642602,
+      "threshold": 1e-09,
+      "pass": true,
+      "time_ms": 17.142674998467555
+    },
+    {
+      "name": "matmul fused n=256",
+      "error": 5.54202389013648e-16,
+      "digits": 15.25633160642602,
+      "threshold": 1e-09,
+      "pass": true,
+      "time_ms": 29.04863399817259
+    },
+    {
+      "name": "matmul JAX arrays n=128",
+      "error": 3.9954235904115234e-16,
+      "digits": 15.398437170486112,
+      "threshold": 1e-09,
+      "pass": true,
+      "time_ms": null
+    },
+    {
+      "name": "matmul rect 64x256 @ 256x32",
+      "error": 5.655652482475913e-16,
+      "digits": 15.247517284073224,
+      "threshold": 1e-09,
+      "pass": true,
+      "time_ms": null
+    },
+    {
+      "name": "gram f64 n=64",
+      "error": 1.6356003011117785e-16,
+      "digits": 15.786322818164674,
+      "threshold": 1e-13,
+      "pass": true,
+      "time_ms": 0.18508600260247476
+    },
+    {
+      "name": "gram ozaki n=64",
+      "error": 1.2552749730005462e-10,
+      "digits": 9.901261129819419,
+      "threshold": 1e-08,
+      "pass": true,
+      "time_ms": 0.7037450013740454
+    },
+    {
+      "name": "gram f64 n=128",
+      "error": 1.7598033584239408e-16,
+      "digits": 15.75453585782367,
+      "threshold": 1e-13,
+      "pass": true,
+      "time_ms": 0.26987499950337224
+    },
+    {
+      "name": "gram ozaki n=128",
+      "error": 1.2989995345330056e-10,
+      "digits": 9.886391004546512,
+      "threshold": 1e-08,
+      "pass": true,
+      "time_ms": 2.2610749983869027
+    },
+    {
+      "name": "gram f64 n=256",
+      "error": 2.098033295254057e-16,
+      "digits": 15.678187623944952,
+      "threshold": 1e-13,
+      "pass": true,
+      "time_ms": 1.084757001081016
+    },
+    {
+      "name": "gram ozaki n=256",
+      "error": 1.3595389158676919e-10,
+      "digits": 9.8666083565173,
+      "threshold": 1e-08,
+      "pass": true,
+      "time_ms": 10.195072001806693
+    },
+    {
+      "name": "gram f64 tall 256x64",
+      "error": 5.04657705047794e-16,
+      "digits": 15.297003091608808,
+      "threshold": 1e-13,
+      "pass": true,
+      "time_ms": null
+    },
+    {
+      "name": "gram symmetry",
+      "error": 0.0,
+      "digits": 16.0,
+      "threshold": 1e-30,
+      "pass": true,
+      "time_ms": null
+    },
+    {
+      "name": "gram PSD",
+      "error": 0,
+      "digits": 16.0,
+      "threshold": 1e-10,
+      "pass": true,
+      "time_ms": null
+    },
+    {
+      "name": "gram JAX arrays n=128",
+      "error": 1.7868957665469822e-16,
+      "digits": 15.747900780081787,
+      "threshold": 1e-13,
+      "pass": true,
+      "time_ms": null
+    },
+    {
+      "name": "residual f64 n=64",
+      "error": 0.0,
+      "digits": 16.0,
+      "threshold": 1e-13,
+      "pass": true,
+      "time_ms": 0.42734800081234425
+    },
+    {
+      "name": "residual ozaki n=64",
+      "error": 2.1787152535985731e-10,
+      "digits": 9.661799526005064,
+      "threshold": 1e-08,
+      "pass": true,
+      "time_ms": 0.8804950011835899
+    },
+    {
+      "name": "residual f64 n=128",
+      "error": 0.0,
+      "digits": 16.0,
+      "threshold": 1e-13,
+      "pass": true,
+      "time_ms": 0.4196939989924431
+    },
+    {
+      "name": "residual ozaki n=128",
+      "error": 1.963168699487176e-10,
+      "digits": 9.707042378898024,
+      "threshold": 1e-08,
+      "pass": true,
+      "time_ms": 2.4593460002506617
+    },
+    {
+      "name": "residual f64 n=256",
+      "error": 0.0,
+      "digits": 16.0,
+      "threshold": 1e-13,
+      "pass": true,
+      "time_ms": 0.46039000153541565
+    },
+    {
+      "name": "residual ozaki n=256",
+      "error": 1.8946647011236614e-10,
+      "digits": 9.722467636005183,
+      "threshold": 1e-08,
+      "pass": true,
+      "time_ms": 4.158400999585865
+    },
+    {
+      "name": "residual f64 matrix RHS",
+      "error": 3.3212985135584853e-16,
+      "digits": 15.478692088880688,
+      "threshold": 1e-13,
+      "pass": true,
+      "time_ms": null
+    },
+    {
+      "name": "residual f64 non-square 64x128",
+      "error": 0.0,
+      "digits": 16.0,
+      "threshold": 1e-13,
+      "pass": true,
+      "time_ms": null
+    },
+    {
+      "name": "residual JAX arrays",
+      "error": 0.0,
+      "digits": 16.0,
+      "threshold": 1e-13,
+      "pass": true,
+      "time_ms": null
+    },
+    {
+      "name": "solve f64 n=64",
+      "error": 4.3965109596551226e-15,
+      "digits": 14.356891839892029,
+      "threshold": 1e-11,
+      "pass": true,
+      "time_ms": 0.4014109981653746
+    },
+    {
+      "name": "solve ozaki n=64",
+      "error": 3.649879632785892e-10,
+      "digits": 9.437721457647319,
+      "threshold": 1e-06,
+      "pass": true,
+      "time_ms": 1.082963000953896
+    },
+    {
+      "name": "solve f64 n=128",
+      "error": 1.002729299142627e-14,
+      "digits": 13.998816295051553,
+      "threshold": 1e-11,
+      "pass": true,
+      "time_ms": 0.6599629996344447
+    },
+    {
+      "name": "solve ozaki n=128",
+      "error": 5.8482088749645335e-09,
+      "digits": 8.232977124486494,
+      "threshold": 1e-06,
+      "pass": true,
+      "time_ms": 1.614417000382673
+    },
+    {
+      "name": "solve f64 n=256",
+      "error": 1.2699766247805692e-14,
+      "digits": 13.89620427260486,
+      "threshold": 1e-11,
+      "pass": true,
+      "time_ms": 1.8317329995625187
+    },
+    {
+      "name": "solve ozaki n=256",
+      "error": 2.6059603797030728e-09,
+      "digits": 8.584032191465772,
+      "threshold": 1e-06,
+      "pass": true,
+      "time_ms": 7.436777999828337
+    },
+    {
+      "name": "solve f64 matrix RHS 128x4",
+      "error": 2.1140790519829226e-14,
+      "digits": 13.67487877710519,
+      "threshold": 1e-11,
+      "pass": true,
+      "time_ms": null
+    },
+    {
+      "name": "solve f64 cond=1e+02 (expect ~14 digits)",
+      "error": 5.17604001811202e-15,
+      "digits": 14.286002374615624,
+      "threshold": 1.0000000000000001e-11,
+      "pass": true,
+      "time_ms": null
+    },
+    {
+      "name": "solve f64 cond=1e+04 (expect ~12 digits)",
+      "error": 1.4787711048207083e-13,
+      "digits": 12.830099044127822,
+      "threshold": 1e-09,
+      "pass": true,
+      "time_ms": null
+    },
+    {
+      "name": "solve f64 cond=1e+06 (expect ~10 digits)",
+      "error": 1.3364466208466586e-09,
+      "digits": 8.874048382762066,
+      "threshold": 1.0000000000000001e-07,
+      "pass": true,
+      "time_ms": null
+    },
+    {
+      "name": "solve f64 cond=1e+10 (info)",
+      "error": 507.6943727670741,
+      "digits": -2.7056023497553006,
+      "info_only": true,
+      "pass": true
+    },
+    {
+      "name": "solve f64 cond=1e+13 (info)",
+      "error": 7.505380754119246,
+      "digits": -0.8753727292533026,
+      "info_only": true,
+      "pass": true
+    },
+    {
+      "name": "solve convergence",
+      "pass": true,
+      "err_0": 9.010296066259052e-06,
+      "err_1": 5.405522532663071e-11,
+      "err_3": 1.349152119835271e-14
+    },
+    {
+      "name": "solve JAX arrays",
+      "error": 1.0825764348666768e-14,
+      "digits": 13.96554143070769,
+      "threshold": 1e-11,
+      "pass": true,
+      "time_ms": null
+    }
+  ],
+  "summary": {
+    "total": 41,
+    "pass": 41,
+    "fail": 0,
+    "all_pass": true
+  },
+  "platform": "cpu",
+  "device_kind": "cpu",
+  "jax_version": "0.9.0.1"
+}
