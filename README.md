@@ -20,7 +20,7 @@ uv pip install -e ".[tpu]"
 ## Public API
 
 ```python
-from ozaki_jax import gram, matmul, matmul_numpy, residual, solve
+from ozaki_jax import gram, inv, lstsq, matmul, matmul_numpy, norm, residual, solve
 ```
 
 - `matmul(A, B, ...)`: accurate matrix multiply with host or on-device Ozaki pipelines.
@@ -28,6 +28,9 @@ from ozaki_jax import gram, matmul, matmul_numpy, residual, solve
 - `gram(A, ...)`: computes symmetric `A.T @ A`.
 - `residual(A, x, b, ...)`: computes accurate `b - A @ x`.
 - `solve(A, b, ...)`: iterative refinement solve with FP32 factorization plus accurate residuals.
+- `inv(A, ...)`: accurate matrix inverse via iterative-refinement solve.
+- `lstsq(A, b, ...)`: least squares `min ||A x - b||` via FP32 QR with augmented-system refinement.
+- `norm(x, ord=...)`: vector/matrix norms; matrix spectral norm uses the accurate Gram matrix.
 
 Input/output typing:
 
@@ -126,6 +129,34 @@ Safety behavior (`safe_mode=`):
 - `residual_mode="f64"` (default): best accuracy and usually best convergence.
 - `residual_mode="ozaki"`: available when FP64 throughput is constrained.
 
+## Inv / Lstsq / Norm Details
+
+### `inv(A, precision="high", accumulation="bf16_interleaved", max_iterations=3, residual_mode="f64")`
+
+- Computes `A^-1` for square `A` by solving `A X = I` with the same iterative
+  refinement as `solve`. Prefer `solve(A, b)` when you only need `A^-1 @ b`.
+
+### `lstsq(A, b, precision="high", accumulation="bf16_interleaved", max_iterations=3, residual_mode="f64")`
+
+- Minimizes `||A x - b||_2` for full-rank `A` with rows >= cols (overdetermined
+  or square). Underdetermined systems are rejected.
+- FP32 QR factored once, then refined on the augmented (Björck) system
+  `[I A; A^T 0][r; x] = [b; 0]`. Refining the residual `r` alongside `x` is what
+  reaches ~FP64 accuracy even when the least-squares residual is large; plain
+  residual refinement of `x` alone stalls near FP32 there.
+- `residual_mode="f64"` (default) or `"ozaki"`, as in `solve`.
+
+### `norm(x, ord=None, precision="high", accumulation="bf16_interleaved", mode="f64")`
+
+- Vector (1D) orders: `None`/`2` (Euclidean), `1`, `inf`, `-inf`, `0`, or any `p`.
+- Matrix (2D) orders: `None`/`'fro'`, `1`, `-1`, `inf`, `-inf`, `2` (spectral).
+- Only the matrix spectral norm (`ord=2`) uses the Ozaki pipeline, computing
+  `sqrt(lambda_max(A^T A))` from the accurate Gram matrix; `precision`,
+  `accumulation`, and `mode` are ignored for all other orders (exact FP64 reductions).
+- A general p-norm (p not in `{1, 2, inf}`) uses `x**p`/`**(1/p)`, whose
+  transcendentals run at ~fp32 precision on TPU (~1e-8); standard orders stay at
+  ~fp64 on all backends. Validated on TPU v6e (`benchmarks/ci_tier1_validate.py`).
+
 ## x64 Requirement
 
 Enable x64 before using:
@@ -134,6 +165,9 @@ Enable x64 before using:
 - `gram()`
 - `residual()`
 - `solve()`
+- `inv()`
+- `lstsq()`
+- `norm()`
 
 ```python
 import jax
@@ -166,6 +200,7 @@ Run from repo root with `uv run`:
 uv run python benchmarks/ci_cpu_validate.py
 uv run python benchmarks/ci_gram_validate.py
 uv run python benchmarks/ci_solve_validate.py
+uv run python benchmarks/ci_tier1_validate.py
 uv run python benchmarks/tpu_validate.py
 uv run python benchmarks/tpu_full_validate.py
 
