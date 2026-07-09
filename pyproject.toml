@@ -32,3 +32,4 @@ tpu = ["jax[tpu]"]
 Homepage = "https://github.com/efithor/ozaki-jax"
 Repository = "https://github.com/efithor/ozaki-jax"
 Issues = "https://github.com/efithor/ozaki-jax/issues"
+Website = "https://www.nodeorange.com/"
